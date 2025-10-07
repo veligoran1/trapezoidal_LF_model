@@ -152,7 +152,7 @@ def evaluate(model, domain: dict, exact_solution=None, n_test: int = 2500):
     if hasattr(model, 'pde_loss'):
         try:
             with torch.enable_grad():
-                # Используем случайную выборку вместо первых 20 точек для лучшей репрезентативности
+
                 sample_idx = torch.randperm(len(test_points))[:50]
                 if is_low_fidelity and 't' in domain:
                     pde_residual = model.pde_loss(
