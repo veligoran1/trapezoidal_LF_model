@@ -36,14 +36,18 @@ def plot(results, history, title="PINN Solution"):
         ax1.set_xlabel('x'), ax1.set_ylabel('t'), ax1.set_zlabel('u')
         ax1.set_title('PINN u(x,t)'), ax1.view_init(elev=25, azim=45)
     
-    # 2. История обучения
+    # 2. История обучения (ИСПРАВЛЕНО)
     ax2 = axes[0, 1]
     epochs = range(len(history['losses']))
-    ax2.semilogy(epochs, history['losses'], 'b-', linewidth=2, label='Total', alpha=0.8)
+    ax2.semilogy(epochs, history['losses'], 'b-', linewidth=2, label='Total Loss', alpha=0.8)
     ax2.semilogy(epochs, history['pde_losses'], 'r-', linewidth=1.5, label='PDE', alpha=0.7)
-    ax2.semilogy(epochs, history['bc_losses'], 'g-', linewidth=1.5, label='BC', alpha=0.7)
-    if any(ic > 0 for ic in history['ic_losses']):
+    
+    # Опционально: BC и IC если есть
+    if 'bc_losses' in history and any(bc > 0 for bc in history['bc_losses']):
+        ax2.semilogy(epochs, history['bc_losses'], 'g-', linewidth=1.5, label='BC', alpha=0.7)
+    if 'ic_losses' in history and any(ic > 0 for ic in history['ic_losses']):
         ax2.semilogy(epochs, history['ic_losses'], 'm-', linewidth=1.5, label='IC', alpha=0.7)
+    
     ax2.set_xlabel('Epoch'), ax2.set_ylabel('Loss (log)')
     ax2.set_title('Training History'), ax2.legend(), ax2.grid(True, alpha=0.3)
     
@@ -95,25 +99,6 @@ def plot(results, history, title="PINN Solution"):
                 transform=ax4.transAxes, fontsize=12, color='gray')
         ax4.axis('off')
     
-    # 5. Ошибка
-    ax5 = axes[1, 1]
-    if u_exact is not None and 'error' in results:
-        error = results['error'].detach().numpy()
-        if is_spatial_2d:
-            err = error.reshape(grid_shape)
-            im5 = ax5.contourf(x, y, err, levels=50, cmap='hot')
-            ax5.set_xlabel('x'), ax5.set_ylabel('y')
-            ax5.set_title(f'Error (max={results["max_error"]:.2e})')
-            plt.colorbar(im5, ax=ax5)
-        else:
-            err = error.reshape(grid_shape)
-            im5 = ax5.contourf(x, t, err, levels=50, cmap='hot')
-            ax5.set_xlabel('x'), ax5.set_ylabel('t')
-            ax5.set_title(f'Error (max={results["max_error"]:.2e})')
-            plt.colorbar(im5, ax=ax5)
-    else:
-        ax5.axis('off')
-    
     # 6. Срезы по времени
     ax6 = axes[1, 2]
     if u_exact is not None and not is_spatial_2d:
@@ -153,7 +138,7 @@ def plot(results, history, title="PINN Solution"):
         print(f"Final Loss: {history['losses'][-1]:.4e}")
         if 'error' in results:
             print(f"Mean Error: {results['mean_error']:.4e}")
-            print(f"Max Error:  {results['max_error']:.4e}")
+            print(f"L2RE Error:  {results['l2re']:.4e}")
         print(f"{'='*60}\n")
 
 # ============================================================
@@ -215,7 +200,21 @@ def plot_theta_field(model, domain, title="", n_grid=50):
     t_next = torch.clamp(t_flat + h, max=t_max)
     
     with torch.no_grad():
-        theta_values = model.theta_net(torch.cat([x_flat, t_flat, t_next], dim=1))
+        # Приближение через IC (быстро):
+        y_approx = model.initial_condition(x_flat)
+        if model.is_wave:
+            y_approx = y_approx[:, 0:1]
+        
+        # ДОБАВЛЕНО: grad_norm = 0 для визуализации
+        grad_norm_dummy = torch.zeros_like(x_flat)
+        
+        # ИЗМЕНЕНО: 5 входов
+        theta_values = model.theta_net(torch.cat([
+            x_flat,
+            t_flat,
+            t_next,
+            grad_norm_dummy
+        ], dim=1))
     
     theta_grid = theta_values.reshape(n_grid, n_grid).numpy()
     
