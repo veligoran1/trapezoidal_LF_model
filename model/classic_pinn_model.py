@@ -71,7 +71,7 @@ class ClassicalPINN(nn.Module):
         return torch.mean(residual**2)
     
     def boundary_loss(self, domain):
-        """Те же граничные условия"""
+        """Граничные и начальные условия (обновлено для включения IC)"""
 
         bc_loss = 0.0
         n_bc = 100
@@ -81,6 +81,7 @@ class ClassicalPINN(nn.Module):
                 x_min, x_max = domain['x']
                 t_min, t_max = domain['t']
                 
+                # Пространственные границы
                 t_bc = torch.rand(n_bc, 1) * (t_max - t_min) + t_min
                 x_left = torch.full_like(t_bc, x_min)
                 x_right = torch.full_like(t_bc, x_max)
@@ -95,6 +96,32 @@ class ClassicalPINN(nn.Module):
                 else:
                     bc_loss += torch.mean(self(points_left)**2)
                     bc_loss += torch.mean(self(points_right)**2)
+                
+                # Начальные условия на t = t_min
+                x_ic = torch.rand(n_bc, 1) * (x_max - x_min) + x_min
+                t_ic = torch.full_like(x_ic, t_min)
+                points_ic = torch.cat([x_ic, t_ic], dim=1)
+                
+                if self.pde_type == 'heat':
+                    u_target = torch.sin(np.pi * x_ic)
+                elif self.pde_type == 'wave':
+                    u_target = torch.sin(np.pi * x_ic)
+                elif self.pde_type == 'burgers':
+                    # Используем приближение, так как t_min мал, или точное
+                    u_target = -torch.sin(np.pi * x_ic)  # Приближение для малого t_min
+                    # Для точного: u_target = torch.from_numpy(compute_burgers_exact(points_ic.cpu(), self.nu.item())).to(points_ic.device)
+                elif self.pde_type == 'reaction_diffusion':
+                    u_target = 0.5 * (1 + torch.tanh(x_ic / np.sqrt(2 * self.D)))
+                
+                points_ic = points_ic.clone().requires_grad_(True)
+                u_pred = self(points_ic)
+                
+                bc_loss += torch.mean((u_pred - u_target)**2)
+                
+                if self.pde_type == 'wave':
+                    grad = torch.autograd.grad(u_pred.sum(), points_ic, create_graph=True)[0]
+                    u_t = grad[:, 1:2]
+                    bc_loss += torch.mean(u_t**2)
                     
             else:  # 2D стационарный
                 x_min, x_max = domain['x']
