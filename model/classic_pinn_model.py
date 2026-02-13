@@ -6,11 +6,16 @@ import numpy as np
 class ClassicalPINN(nn.Module):
     """Классическая PINN без численных схем"""
     
-    def __init__(self, pde_type: str, input_dim: int = 2, hidden_dim: int = 6):
+    def __init__(self, pde_type: str, input_dim: int = 2, hidden_dim: int = 6,
+                learnable_params: bool = False, param_init: float = 0.5):
         super().__init__()
         self.pde_type = pde_type
         self.input_dim = input_dim
+        self.hidden_dim = hidden_dim  # ДОБАВЛЕНО: сохраняем hidden_dim
         
+        self.learnable_params = learnable_params
+        self.param_init = param_init
+
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.Tanh(),
@@ -22,17 +27,39 @@ class ClassicalPINN(nn.Module):
         self._init_params()
     
     def _init_params(self):
+        """Инициализация параметров PDE (buffer или Parameter)"""
+        init_val = self.param_init if self.learnable_params else None
+        
         if self.pde_type == 'heat':
-            self.register_buffer('alpha', torch.tensor(1.0))
+            val = init_val if self.learnable_params else 1.0
+            if self.learnable_params:
+                self.alpha = nn.Parameter(torch.tensor(val))
+            else:
+                self.register_buffer('alpha', torch.tensor(val))
+                
         elif self.pde_type == 'wave':
-            self.register_buffer('c', torch.tensor(1.0))
+            val = init_val if self.learnable_params else 1.0
+            if self.learnable_params:
+                self.c = nn.Parameter(torch.tensor(val))
+            else:
+                self.register_buffer('c', torch.tensor(val))
+                
         elif self.pde_type == 'burgers':
-            self.register_buffer('nu', torch.tensor(0.01/np.pi))
-        elif self.pde_type == 'poisson':
-            pass
+            val = init_val if self.learnable_params else 0.01
+            if self.learnable_params:
+                self.nu = nn.Parameter(torch.tensor(val))
+            else:
+                self.register_buffer('nu', torch.tensor(val))
+            
         elif self.pde_type == 'reaction_diffusion':
-            self.register_buffer('D', torch.tensor(0.01))
-            self.register_buffer('r', torch.tensor(1.0))
+            val_D = init_val if self.learnable_params else 0.01
+            val_r = init_val if self.learnable_params else 1.0
+            if self.learnable_params:
+                self.D = nn.Parameter(torch.tensor(val_D))
+                self.r = nn.Parameter(torch.tensor(val_r))
+            else:
+                self.register_buffer('D', torch.tensor(val_D))
+                self.register_buffer('r', torch.tensor(val_r))
     
     def forward(self, x):
         return self.net(x)
@@ -44,37 +71,26 @@ class ClassicalPINN(nn.Module):
         
         # Производные
         grad = torch.autograd.grad(u.sum(), x, create_graph=True)[0]
-        
-        if self.pde_type == 'poisson':
-            u_x, u_y = grad[:, 0:1], grad[:, 1:2]
-            u_xx = torch.autograd.grad(u_x.sum(), x, create_graph=True)[0][:, 0:1]
-            u_yy = torch.autograd.grad(u_y.sum(), x, create_graph=True)[0][:, 1:2]
             
-            x_coord, y_coord = x[:, 0:1], x[:, 1:2]
-            rhs = -2 * np.pi**2 * torch.sin(np.pi * x_coord) * torch.sin(np.pi * y_coord)
-            residual = u_xx + u_yy - rhs
+        u_x, u_t = grad[:, 0:1], grad[:, 1:2]
+        u_xx = torch.autograd.grad(u_x.sum(), x, create_graph=True)[0][:, 0:1]
             
-        else:  # Эволюционные уравнения
-            u_x, u_t = grad[:, 0:1], grad[:, 1:2]
-            u_xx = torch.autograd.grad(u_x.sum(), x, create_graph=True)[0][:, 0:1]
-            
-            if self.pde_type == 'heat':
-                residual = u_t - self.alpha * u_xx
-            elif self.pde_type == 'wave':
-                u_tt = torch.autograd.grad(u_t.sum(), x, create_graph=True)[0][:, 1:2]
-                residual = u_tt - self.c**2 * u_xx
-            elif self.pde_type == 'burgers':
-                residual = u_t + u * u_x - self.nu * u_xx
-            elif self.pde_type == 'reaction_diffusion':
-                residual = u_t - self.D * u_xx - self.r * u * (1 - u)
+        if self.pde_type == 'heat':
+            residual = u_t - self.alpha * u_xx
+        elif self.pde_type == 'wave':
+            u_tt = torch.autograd.grad(u_t.sum(), x, create_graph=True)[0][:, 1:2]
+            residual = u_tt - self.c**2 * u_xx
+        elif self.pde_type == 'burgers':
+            residual = u_t + u * u_x - self.nu * u_xx
+        elif self.pde_type == 'reaction_diffusion':
+            residual = u_t - self.D * u_xx - self.r * u * (1 - u)
         
         return torch.mean(residual**2)
     
     def boundary_loss(self, domain):
-        """Граничные и начальные условия (обновлено для включения IC)"""
-
+        """Граничные и начальные условия"""
         bc_loss = 0.0
-        n_bc = 100
+        n_bc = 10
         
         if self.input_dim == 2:
             if 't' in domain:  # 1D + время
@@ -107,11 +123,9 @@ class ClassicalPINN(nn.Module):
                 elif self.pde_type == 'wave':
                     u_target = torch.sin(np.pi * x_ic)
                 elif self.pde_type == 'burgers':
-                    # Используем приближение, так как t_min мал, или точное
-                    u_target = -torch.sin(np.pi * x_ic)  # Приближение для малого t_min
-                    # Для точного: u_target = torch.from_numpy(compute_burgers_exact(points_ic.cpu(), self.nu.item())).to(points_ic.device)
+                    u_target = -torch.sin(np.pi * x_ic)
                 elif self.pde_type == 'reaction_diffusion':
-                    u_target = 0.5 * (1 + torch.tanh(x_ic / np.sqrt(2 * self.D)))
+                    u_target = 0.5 * (1 + torch.tanh(x_ic / torch.sqrt(2 * self.D)))
                 
                 points_ic = points_ic.clone().requires_grad_(True)
                 u_pred = self(points_ic)
@@ -141,8 +155,21 @@ class ClassicalPINN(nn.Module):
         return bc_loss
     
     def get_params(self):
-        """Для совместимости"""
-        params = {}
-        for name, param in self.named_buffers():
-            params[name] = param.item()
+        """Для совместимости и мониторинга"""
+        params = {
+            'hidden_dim': self.hidden_dim,
+            'learnable_params': self.learnable_params
+        }
+        # Buffers
+        for name, buf in self.named_buffers():
+            if name in ['alpha', 'c', 'nu', 'D', 'r']:
+                params[name] = buf.item()
+        # Parameters (обучаемые)
+        for name, p in self.named_parameters():
+            if name in ['alpha', 'c', 'nu', 'D', 'r']:
+                params[name] = p.item()
         return params
+    
+    def count_parameters(self):
+        """Подсчет количества параметров"""
+        return sum(p.numel() for p in self.parameters())

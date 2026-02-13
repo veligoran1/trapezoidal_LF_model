@@ -1,88 +1,69 @@
+# model/lf_model_test_initial_theta.py
+
 import torch
 import torch.nn as nn
 import numpy as np
 
-class LowFidelityPINN(nn.Module):
+class LFPinn_InitialTheta_Test(nn.Module):
+    """
+    LF-PINN для тестирования разных начальных значений theta.
+    Копия LFPinn_Activation_Test, но с параметром initial_theta вместо activation.
+    """
     
-    def __init__(self, pde_type: str, n_steps: int = 2, theta_hidden_dim: int = 2, 
+    def __init__(self, pde_type: str, n_steps: int = 10, theta_hidden_dim: int = 2, 
                  n_iterations: int = 2, lr: float = 0.001,
-                 learnable_params: bool = False, param_init: float = 0.5,
-                 initial_theta: float = 0.5):
+                 initial_theta: float = 0.5):  # НОВЫЙ ПАРАМЕТР
         super().__init__()
         self.pde_type = pde_type
         self.n_steps = n_steps
         self.is_wave = (pde_type == 'wave')
         self.n_iterations = n_iterations
         self.lr = lr
-        
-        self.learnable_params = learnable_params
-        self.param_init = param_init
         self.initial_theta = initial_theta
-
+        
+        # Стандартная архитектура с tanh
         self.theta_net = nn.Sequential(
-            nn.Linear(4, theta_hidden_dim), nn.Tanh(),
-            nn.Linear(theta_hidden_dim, 1), nn.Sigmoid()
+            nn.Linear(4, theta_hidden_dim), 
+            nn.Tanh(),
+            nn.Linear(theta_hidden_dim, 1), 
+            nn.Sigmoid()
         )
         
         self._init_params()
         self._init_theta_bias(initial_theta)
-
         self._print_info()
     
     def _init_theta_bias(self, target_theta: float):
         """
-        Initialize bias so that initial theta_net output ≈ target_theta.
+        Инициализирует bias так, чтобы начальный выход theta_net ≈ target_theta.
         sigmoid(bias) ≈ target_theta  =>  bias = logit(target_theta)
         """
         with torch.no_grad():
+            # Clamp чтобы избежать inf при theta=0 или theta=1
             target_clamped = np.clip(target_theta, 0.01, 0.99)
             bias_value = np.log(target_clamped / (1 - target_clamped))
             nn.init.xavier_normal_(self.theta_net[-2].weight, gain=0.1)
             self.theta_net[-2].bias.fill_(bias_value)
     
     def _init_params(self):
-        """Initialize PDE parameters (buffer or Parameter)"""
-        init_val = self.param_init if self.learnable_params else None
-        
         if self.pde_type == 'heat':
-            val = init_val if self.learnable_params else 1.0
-            if self.learnable_params:
-                self.alpha = nn.Parameter(torch.tensor(val))
-            else:
-                self.register_buffer('alpha', torch.tensor(val))
-                
+            self.register_buffer('alpha', torch.tensor(1.0))
         elif self.pde_type == 'wave':
-            val = init_val if self.learnable_params else 1.0
-            if self.learnable_params:
-                self.c = nn.Parameter(torch.tensor(val))
-            else:
-                self.register_buffer('c', torch.tensor(val))
-                
+            self.register_buffer('c', torch.tensor(1.0))
         elif self.pde_type == 'burgers':
-            val = init_val if self.learnable_params else 0.01
-            if self.learnable_params:
-                self.nu = nn.Parameter(torch.tensor(val))
-            else:
-                self.register_buffer('nu', torch.tensor(val))
-                
+            self.register_buffer('nu', torch.tensor(0.01))
         elif self.pde_type == 'reaction_diffusion':
-            val_D = init_val if self.learnable_params else 0.01
-            val_r = init_val if self.learnable_params else 1.0
-            if self.learnable_params:
-                self.D = nn.Parameter(torch.tensor(val_D))
-                self.r = nn.Parameter(torch.tensor(val_r))
-            else:
-                self.register_buffer('D', torch.tensor(val_D))
-                self.register_buffer('r', torch.tensor(val_r))
+            self.register_buffer('D', torch.tensor(0.01))
+            self.register_buffer('r', torch.tensor(1.0))
     
     def _print_info(self):
         n_params = sum(p.numel() for p in self.theta_net.parameters())
-        print(f"\n{'='*60}")
-        print(f"Low-Fidelity PINN (Fixed-Point + Adaptive Steps)")
-        print(f"PDE: {self.pde_type} | Max Steps: {self.n_steps} | Params: {n_params}")
-        print(f"Iterations: {self.n_iterations} | LR: {self.lr}")
-        print(f"Initial theta: {self.initial_theta}")
-        print(f"{'='*60}\n")
+        theta_name = {0.0: 'Implicit', 0.5: 'Trapezoidal', 1.0: 'Explicit'}.get(
+            self.initial_theta, f'Custom({self.initial_theta:.2f})'
+        )
+        print(f"  LF-PINN | Initial θ: {theta_name} ({self.initial_theta}) | Params: {n_params}")
+    
+    # ================= Остальные методы идентичны LFPinn_Activation_Test =================
     
     def initial_condition(self, x):
         if self.pde_type == 'heat':
@@ -92,7 +73,7 @@ class LowFidelityPINN(nn.Module):
         elif self.pde_type == 'burgers':
             return -torch.sin(np.pi * x)
         elif self.pde_type == 'reaction_diffusion':
-            return 0.5 * (1 + torch.tanh(x / torch.sqrt(2 * self.D)))
+            return 0.5 * (1 + torch.tanh(x / np.sqrt(2 * 0.01)))
         return torch.zeros_like(x)
     
     def compute_rhs(self, x, t, state):
@@ -121,10 +102,6 @@ class LowFidelityPINN(nn.Module):
             return self.D * u_xx + self.r * u * (1 - u)
     
     def forward(self, x, t_end):
-        """
-        Uses self.n_iterations for fixed-point iterations.
-        Adaptively selects number of steps based on t_end.
-        """
         batch_size = x.shape[0]
         device, dtype = x.device, x.dtype
         
@@ -139,44 +116,27 @@ class LowFidelityPINN(nn.Module):
             x = x.clone().requires_grad_(True)
         
         h = t_end / self.n_steps
-        
         y = self.initial_condition(x)
         t = torch.zeros(batch_size, 1, dtype=dtype, device=device)
     
         for _ in range(self.n_steps):
             t_next = t + h
-
             y_for_theta = y[:, 0:1] if self.is_wave else y
 
-            # Compute gradient norm
-            y_x = torch.autograd.grad(
-                y_for_theta.sum(), x,
-                create_graph=True,
-                retain_graph=True,
-                allow_unused=True
-            )[0]
+            y_x = torch.autograd.grad(y_for_theta.sum(), x, create_graph=True, retain_graph=True, allow_unused=True)[0]
             if y_x is None:
                 y_x = torch.zeros_like(x)
             grad_norm = torch.abs(y_x)
-            
-            # Normalize grad_norm
             grad_norm_norm = torch.tanh(grad_norm / 5.0)
             
             theta = self.theta_net(torch.cat([
-                x.detach(),
-                t.detach(),
-                t_next.detach(),
-                grad_norm_norm.detach()
+                x.detach(), t.detach(), t_next.detach(), grad_norm_norm.detach()
             ], dim=1))
 
-            t_next = t + h
-            
-            # Compute f_curr once
             f_curr = self.compute_rhs(x, t, y)
 
-            # Fixed-point iterations
             y_new = y.clone()
-            for iter in range(self.n_iterations):
+            for _ in range(self.n_iterations):
                 f_next = self.compute_rhs(x, t_next, y_new)
                 y_new = y + h * ((1 - theta) * f_curr + theta * f_next)
             
@@ -235,9 +195,7 @@ class LowFidelityPINN(nn.Module):
             x_ic = torch.rand(n_ic, 1, device=next(self.parameters()).device)
         
         t_zero = torch.zeros_like(x_ic, device=x_ic.device)
-        
         u_pred = self.forward(x_ic, t_zero)
-        
         u_true = self.initial_condition(x_ic)
         
         if self.is_wave:
@@ -245,8 +203,7 @@ class LowFidelityPINN(nn.Module):
         
         return torch.mean((u_pred - u_true)**2)
     
-    def total_loss(self, domain, n_collocation=30,
-                   lambda_pde=1.0, lambda_bc=10.0, lambda_ic=10.0):
+    def total_loss(self, domain, n_collocation=30, lambda_pde=1.0, lambda_bc=10.0, lambda_ic=10.0):
         x_min, x_max = domain['x']
         t_min, t_max = domain['t']
         device = next(self.parameters()).device
@@ -255,97 +212,22 @@ class LowFidelityPINN(nn.Module):
         t_col = torch.rand(n_collocation, 1, device=device) * (t_max - t_min) + t_min
         
         loss_pde = self.pde_loss(x_col, t_col)
-        loss_bc = self.boundary_loss(domain, n_bc=10)
-        loss_ic = self.initial_condition_loss(x_col, n_ic=10)
+        loss_bc = self.boundary_loss(domain, n_bc=n_collocation)
+        loss_ic = self.initial_condition_loss(x_col, n_ic=n_collocation)
         
         total = lambda_pde * loss_pde + lambda_bc * loss_bc + lambda_ic * loss_ic
         
         return total, {
-            'pde': loss_pde.item(),
-            'bc': loss_bc.item(),
-            'ic': loss_ic.item(),
-            'total': total.item()
-        }
-    
-    def data_loss(self, x_data, t_data, u_observed):
-        """
-        Compute data loss - difference between predictions and observations.
-        
-        Args:
-            x_data: torch.Tensor [n_data, 1] - spatial coordinates of observations
-            t_data: torch.Tensor [n_data, 1] - temporal coordinates of observations
-            u_observed: torch.Tensor [n_data, 1] - measured values of u
-        
-        Returns:
-            data_loss: torch.Tensor - MSE between predictions and observations
-        """
-        u_pred = self.forward(x_data, t_data)
-        loss = torch.mean((u_pred - u_observed)**2)
-        return loss
-
-    def total_loss_with_data(self, domain, data_points=None, data_values=None,
-                            n_collocation=30, lambda_pde=1.0, lambda_bc=10.0, 
-                            lambda_ic=10.0, lambda_data=10.0):
-        """
-        Full loss function including data loss.
-        
-        Args:
-            domain: dictionary with domain boundaries
-            data_points: torch.Tensor [n_data, 2] or None - observation points (x, t)
-            data_values: torch.Tensor [n_data, 1] or None - u values at points
-            n_collocation: number of collocation points
-            lambda_pde, lambda_bc, lambda_ic: weights for PDE, BC, IC
-            lambda_data: weight for data loss
-        """
-        x_min, x_max = domain['x']
-        t_min, t_max = domain['t']
-        device = next(self.parameters()).device
-        
-        x_col = torch.rand(n_collocation, 1, device=device) * (x_max - x_min) + x_min
-        t_col = torch.rand(n_collocation, 1, device=device) * (t_max - t_min) + t_min
-        
-        loss_pde = self.pde_loss(x_col, t_col)
-        loss_bc = self.boundary_loss(domain, n_bc=10)
-        loss_ic = self.initial_condition_loss(x_col, n_ic=10)
-        
-        loss_data = torch.tensor(0.0, device=device)
-        if data_points is not None and data_values is not None:
-            x_data = data_points[:, 0:1]
-            t_data = data_points[:, 1:2]
-            loss_data = self.data_loss(x_data, t_data, data_values)
-        
-        total = (lambda_pde * loss_pde + 
-                lambda_bc * loss_bc + 
-                lambda_ic * loss_ic + 
-                lambda_data * loss_data)
-        
-        return total, {
-            'pde': loss_pde.item(),
-            'bc': loss_bc.item(),
-            'ic': loss_ic.item(),
-            'data': loss_data.item(),
-            'total': total.item()
+            'pde': loss_pde.item(), 'bc': loss_bc.item(), 
+            'ic': loss_ic.item(), 'total': total.item()
         }
     
     def get_params(self):
-        params = {
-            'n_steps': self.n_steps, 
-            'n_iterations': self.n_iterations, 
-            'lr': self.lr,
-            'learnable_params': self.learnable_params,
-            'initial_theta': self.initial_theta
-        }
-        for name, buf in self.named_buffers():
-            if name in ['alpha', 'c', 'nu', 'D', 'r']:
-                params[name] = buf.item()
-        for name, p in self.named_parameters():
-            if name in ['alpha', 'c', 'nu', 'D', 'r']:
-                params[name] = p.item()
+        params = {'n_steps': self.n_steps, 'n_iterations': self.n_iterations, 
+                  'lr': self.lr, 'initial_theta': self.initial_theta}
+        for name, param in self.named_buffers():
+            params[name] = param.item()
         return params
-    
-    def get_optimizer(self):
-        """Create optimizer with learning rate from self.lr"""
-        return torch.optim.Adam(self.parameters(), lr=self.lr)
     
     def get_theta_statistics(self, domain, n_samples=100):
         x_min, x_max = domain['x']
@@ -358,22 +240,12 @@ class LowFidelityPINN(nn.Module):
         t_next = torch.clamp(t_sample + h, max=t_max)
         
         with torch.no_grad():
-            y_approx = self.initial_condition(x_sample)
-            if self.is_wave:
-                y_approx = y_approx[:, 0:1]
-            
             grad_norm_approx = torch.zeros_like(x_sample)
-            
             theta_values = self.theta_net(torch.cat([
-                x_sample,
-                t_sample,
-                t_next,
-                grad_norm_approx
+                x_sample, t_sample, t_next, grad_norm_approx
             ], dim=1))
         
         return {
-            'mean': theta_values.mean().item(),
-            'std': theta_values.std().item(),
-            'min': theta_values.min().item(),
-            'max': theta_values.max().item()
+            'mean': theta_values.mean().item(), 'std': theta_values.std().item(),
+            'min': theta_values.min().item(), 'max': theta_values.max().item()
         }

@@ -2,89 +2,105 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-class LowFidelityPINN(nn.Module):
+class LFPinn_Optimizer_Test(nn.Module):
+    """
+    LF-PINN for testing different optimizers.
+    """
     
-    def __init__(self, pde_type: str, n_steps: int = 2, theta_hidden_dim: int = 2, 
+    def __init__(self, pde_type: str, n_steps: int = 10, theta_hidden_dim: int = 5, 
                  n_iterations: int = 2, lr: float = 0.001,
-                 learnable_params: bool = False, param_init: float = 0.5,
-                 initial_theta: float = 0.5):
+                 optimizer: str = 'adam'):
         super().__init__()
         self.pde_type = pde_type
         self.n_steps = n_steps
         self.is_wave = (pde_type == 'wave')
         self.n_iterations = n_iterations
         self.lr = lr
+        self.optimizer_name = optimizer
         
-        self.learnable_params = learnable_params
-        self.param_init = param_init
-        self.initial_theta = initial_theta
-
+        # Validate optimizer name
+        valid_optimizers = [
+            'adam', 'adamw', 'adamw_wd01', 'adamw_wd001',
+            'sgd', 'sgd_momentum', 'sgd_nesterov',
+            'rmsprop', 'rmsprop_centered',
+            'nadam', 'radam', 'adamax'
+        ]
+        if optimizer not in valid_optimizers:
+            raise ValueError(f"Unknown optimizer: {optimizer}. Choose from {valid_optimizers}")
+        
         self.theta_net = nn.Sequential(
-            nn.Linear(4, theta_hidden_dim), nn.Tanh(),
-            nn.Linear(theta_hidden_dim, 1), nn.Sigmoid()
+            nn.Linear(4, theta_hidden_dim), 
+            nn.Tanh(),
+            nn.Linear(theta_hidden_dim, 1), 
+            nn.Sigmoid()
         )
         
         self._init_params()
-        self._init_theta_bias(initial_theta)
+        
+        with torch.no_grad():
+            nn.init.xavier_normal_(self.theta_net[-2].weight, gain=0.1)
+            self.theta_net[-2].bias.fill_(0.0)
 
         self._print_info()
     
-    def _init_theta_bias(self, target_theta: float):
-        """
-        Initialize bias so that initial theta_net output ≈ target_theta.
-        sigmoid(bias) ≈ target_theta  =>  bias = logit(target_theta)
-        """
-        with torch.no_grad():
-            target_clamped = np.clip(target_theta, 0.01, 0.99)
-            bias_value = np.log(target_clamped / (1 - target_clamped))
-            nn.init.xavier_normal_(self.theta_net[-2].weight, gain=0.1)
-            self.theta_net[-2].bias.fill_(bias_value)
-    
     def _init_params(self):
-        """Initialize PDE parameters (buffer or Parameter)"""
-        init_val = self.param_init if self.learnable_params else None
-        
+        """Initialize PDE parameters"""
         if self.pde_type == 'heat':
-            val = init_val if self.learnable_params else 1.0
-            if self.learnable_params:
-                self.alpha = nn.Parameter(torch.tensor(val))
-            else:
-                self.register_buffer('alpha', torch.tensor(val))
-                
+            self.register_buffer('alpha', torch.tensor(1.0))
         elif self.pde_type == 'wave':
-            val = init_val if self.learnable_params else 1.0
-            if self.learnable_params:
-                self.c = nn.Parameter(torch.tensor(val))
-            else:
-                self.register_buffer('c', torch.tensor(val))
-                
+            self.register_buffer('c', torch.tensor(1.0))
         elif self.pde_type == 'burgers':
-            val = init_val if self.learnable_params else 0.01
-            if self.learnable_params:
-                self.nu = nn.Parameter(torch.tensor(val))
-            else:
-                self.register_buffer('nu', torch.tensor(val))
-                
+            self.register_buffer('nu', torch.tensor(0.01))
         elif self.pde_type == 'reaction_diffusion':
-            val_D = init_val if self.learnable_params else 0.01
-            val_r = init_val if self.learnable_params else 1.0
-            if self.learnable_params:
-                self.D = nn.Parameter(torch.tensor(val_D))
-                self.r = nn.Parameter(torch.tensor(val_r))
-            else:
-                self.register_buffer('D', torch.tensor(val_D))
-                self.register_buffer('r', torch.tensor(val_r))
+            self.register_buffer('D', torch.tensor(0.01))
+            self.register_buffer('r', torch.tensor(1.0))
     
     def _print_info(self):
+        """Print model information"""
         n_params = sum(p.numel() for p in self.theta_net.parameters())
         print(f"\n{'='*60}")
-        print(f"Low-Fidelity PINN (Fixed-Point + Adaptive Steps)")
-        print(f"PDE: {self.pde_type} | Max Steps: {self.n_steps} | Params: {n_params}")
-        print(f"Iterations: {self.n_iterations} | LR: {self.lr}")
-        print(f"Initial theta: {self.initial_theta}")
+        print(f"Low-Fidelity PINN (Optimizer Test)")
+        print(f"PDE: {self.pde_type} | Optimizer: {self.optimizer_name.upper()} | Params: {n_params}")
+        print(f"Max Steps: {self.n_steps} | Iterations: {self.n_iterations} | LR: {self.lr}")
         print(f"{'='*60}\n")
     
+    def get_optimizer(self):
+        """
+        Create optimizer based on self.optimizer_name.
+        
+        Available optimizers:
+        - adam: Standard Adam
+        - adamw: AdamW with default weight_decay=0.01
+        - adamw_wd01: AdamW with weight_decay=0.1
+        - adamw_wd001: AdamW with weight_decay=0.001
+        - sgd: Standard SGD
+        - sgd_momentum: SGD with momentum=0.9
+        - sgd_nesterov: SGD with momentum=0.9 and Nesterov
+        - rmsprop: RMSprop
+        - rmsprop_centered: RMSprop with centered=True
+        - nadam: NAdam (Adam with Nesterov momentum)
+        - radam: RAdam (Rectified Adam)
+        - adamax: Adamax (Adam with infinity norm)
+        """
+        optimizer_dict = {
+            'adam': lambda p, lr: torch.optim.Adam(p, lr=lr),
+            'adamw': lambda p, lr: torch.optim.AdamW(p, lr=lr, weight_decay=0.01),
+            'adamw_wd01': lambda p, lr: torch.optim.AdamW(p, lr=lr, weight_decay=0.1),
+            'adamw_wd001': lambda p, lr: torch.optim.AdamW(p, lr=lr, weight_decay=0.001),
+            'sgd': lambda p, lr: torch.optim.SGD(p, lr=lr),
+            'sgd_momentum': lambda p, lr: torch.optim.SGD(p, lr=lr, momentum=0.9),
+            'sgd_nesterov': lambda p, lr: torch.optim.SGD(p, lr=lr, momentum=0.9, nesterov=True),
+            'rmsprop': lambda p, lr: torch.optim.RMSprop(p, lr=lr),
+            'rmsprop_centered': lambda p, lr: torch.optim.RMSprop(p, lr=lr, centered=True),
+            'nadam': lambda p, lr: torch.optim.NAdam(p, lr=lr),
+            'radam': lambda p, lr: torch.optim.RAdam(p, lr=lr),
+            'adamax': lambda p, lr: torch.optim.Adamax(p, lr=lr),
+        }
+        
+        return optimizer_dict[self.optimizer_name](self.parameters(), self.lr)
+    
     def initial_condition(self, x):
+        """Initial conditions for PDE"""
         if self.pde_type == 'heat':
             return torch.sin(np.pi * x)
         elif self.pde_type == 'wave':
@@ -92,10 +108,11 @@ class LowFidelityPINN(nn.Module):
         elif self.pde_type == 'burgers':
             return -torch.sin(np.pi * x)
         elif self.pde_type == 'reaction_diffusion':
-            return 0.5 * (1 + torch.tanh(x / torch.sqrt(2 * self.D)))
+            return 0.5 * (1 + torch.tanh(x / np.sqrt(2 * 0.01)))
         return torch.zeros_like(x)
     
     def compute_rhs(self, x, t, state):
+        """Compute right-hand side of PDE"""
         if not state.requires_grad:
             return torch.zeros_like(state)
         
@@ -122,6 +139,7 @@ class LowFidelityPINN(nn.Module):
     
     def forward(self, x, t_end):
         """
+        Forward pass through model.
         Uses self.n_iterations for fixed-point iterations.
         Adaptively selects number of steps based on t_end.
         """
@@ -162,6 +180,7 @@ class LowFidelityPINN(nn.Module):
             # Normalize grad_norm
             grad_norm_norm = torch.tanh(grad_norm / 5.0)
             
+            # Compute theta
             theta = self.theta_net(torch.cat([
                 x.detach(),
                 t.detach(),
@@ -186,6 +205,7 @@ class LowFidelityPINN(nn.Module):
         return y[:, 0:1] if self.is_wave else y
     
     def pde_loss(self, x_col, t_col):
+        """Compute PDE loss"""
         x_col = x_col.detach().clone().requires_grad_(True) 
         t_col = t_col.detach().clone().requires_grad_(True)
         u = self.forward(x_col, t_col)
@@ -211,6 +231,7 @@ class LowFidelityPINN(nn.Module):
         return torch.mean(residual**2)
     
     def boundary_loss(self, domain, n_bc=10):
+        """Compute boundary loss"""
         x_min, x_max = domain['x']
         t_min, t_max = domain['t']
         device = next(self.parameters()).device
@@ -231,13 +252,13 @@ class LowFidelityPINN(nn.Module):
         return torch.tensor(0.0, device=device)
     
     def initial_condition_loss(self, x_ic, n_ic=10):
+        """Compute initial condition loss"""
         if x_ic is None:
             x_ic = torch.rand(n_ic, 1, device=next(self.parameters()).device)
         
         t_zero = torch.zeros_like(x_ic, device=x_ic.device)
         
         u_pred = self.forward(x_ic, t_zero)
-        
         u_true = self.initial_condition(x_ic)
         
         if self.is_wave:
@@ -247,6 +268,7 @@ class LowFidelityPINN(nn.Module):
     
     def total_loss(self, domain, n_collocation=30,
                    lambda_pde=1.0, lambda_bc=10.0, lambda_ic=10.0):
+        """Compute total loss"""
         x_min, x_max = domain['x']
         t_min, t_max = domain['t']
         device = next(self.parameters()).device
@@ -255,8 +277,8 @@ class LowFidelityPINN(nn.Module):
         t_col = torch.rand(n_collocation, 1, device=device) * (t_max - t_min) + t_min
         
         loss_pde = self.pde_loss(x_col, t_col)
-        loss_bc = self.boundary_loss(domain, n_bc=10)
-        loss_ic = self.initial_condition_loss(x_col, n_ic=10)
+        loss_bc = self.boundary_loss(domain, n_bc=n_collocation)
+        loss_ic = self.initial_condition_loss(x_col, n_ic=n_collocation)
         
         total = lambda_pde * loss_pde + lambda_bc * loss_bc + lambda_ic * loss_ic
         
@@ -267,87 +289,20 @@ class LowFidelityPINN(nn.Module):
             'total': total.item()
         }
     
-    def data_loss(self, x_data, t_data, u_observed):
-        """
-        Compute data loss - difference between predictions and observations.
-        
-        Args:
-            x_data: torch.Tensor [n_data, 1] - spatial coordinates of observations
-            t_data: torch.Tensor [n_data, 1] - temporal coordinates of observations
-            u_observed: torch.Tensor [n_data, 1] - measured values of u
-        
-        Returns:
-            data_loss: torch.Tensor - MSE between predictions and observations
-        """
-        u_pred = self.forward(x_data, t_data)
-        loss = torch.mean((u_pred - u_observed)**2)
-        return loss
-
-    def total_loss_with_data(self, domain, data_points=None, data_values=None,
-                            n_collocation=30, lambda_pde=1.0, lambda_bc=10.0, 
-                            lambda_ic=10.0, lambda_data=10.0):
-        """
-        Full loss function including data loss.
-        
-        Args:
-            domain: dictionary with domain boundaries
-            data_points: torch.Tensor [n_data, 2] or None - observation points (x, t)
-            data_values: torch.Tensor [n_data, 1] or None - u values at points
-            n_collocation: number of collocation points
-            lambda_pde, lambda_bc, lambda_ic: weights for PDE, BC, IC
-            lambda_data: weight for data loss
-        """
-        x_min, x_max = domain['x']
-        t_min, t_max = domain['t']
-        device = next(self.parameters()).device
-        
-        x_col = torch.rand(n_collocation, 1, device=device) * (x_max - x_min) + x_min
-        t_col = torch.rand(n_collocation, 1, device=device) * (t_max - t_min) + t_min
-        
-        loss_pde = self.pde_loss(x_col, t_col)
-        loss_bc = self.boundary_loss(domain, n_bc=10)
-        loss_ic = self.initial_condition_loss(x_col, n_ic=10)
-        
-        loss_data = torch.tensor(0.0, device=device)
-        if data_points is not None and data_values is not None:
-            x_data = data_points[:, 0:1]
-            t_data = data_points[:, 1:2]
-            loss_data = self.data_loss(x_data, t_data, data_values)
-        
-        total = (lambda_pde * loss_pde + 
-                lambda_bc * loss_bc + 
-                lambda_ic * loss_ic + 
-                lambda_data * loss_data)
-        
-        return total, {
-            'pde': loss_pde.item(),
-            'bc': loss_bc.item(),
-            'ic': loss_ic.item(),
-            'data': loss_data.item(),
-            'total': total.item()
-        }
-    
     def get_params(self):
+        """Get model parameters"""
         params = {
             'n_steps': self.n_steps, 
             'n_iterations': self.n_iterations, 
             'lr': self.lr,
-            'learnable_params': self.learnable_params,
-            'initial_theta': self.initial_theta
+            'optimizer': self.optimizer_name
         }
-        for name, buf in self.named_buffers():
-            if name in ['alpha', 'c', 'nu', 'D', 'r']:
-                params[name] = buf.item()
-        for name, p in self.named_parameters():
-            if name in ['alpha', 'c', 'nu', 'D', 'r']:
-                params[name] = p.item()
+        for name, param in self.named_buffers():
+            params[name] = param.item()
         return params
     
-    def get_optimizer(self):
-        """Create optimizer with learning rate from self.lr"""
-        return torch.optim.Adam(self.parameters(), lr=self.lr)
-    
     def get_theta_statistics(self, domain, n_samples=100):
+        """Get theta statistics"""
         x_min, x_max = domain['x']
         t_min, t_max = domain['t']
         device = next(self.parameters()).device
