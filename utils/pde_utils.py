@@ -3,12 +3,13 @@ import numpy as np
 from scipy.integrate import quad
 import time
 
+
 # ============================================================
-# ГЕНЕРАЦИЯ ТОЧЕК
+# POINT GENERATION
 # ============================================================
 
 def generate_points(domain: dict, n_points: int):
-    """Генерация случайных точек в области"""
+    """Generate random points in the domain"""
     if 't' in domain:
         x = torch.rand(n_points, 1) * (domain['x'][1] - domain['x'][0]) + domain['x'][0]
         t = torch.rand(n_points, 1) * (domain['t'][1] - domain['t'][0]) + domain['t'][0]
@@ -19,7 +20,7 @@ def generate_points(domain: dict, n_points: int):
         return torch.cat([x, y], dim=1)
 
 def create_grid(domain: dict, n: int = 50):
-    """Создание регулярной сетки для визуализации"""
+    """Create regular grid for visualization"""
     if 't' in domain:
         x = torch.linspace(domain['x'][0], domain['x'][1], n)
         t = torch.linspace(domain['t'][0], domain['t'][1], n)
@@ -31,19 +32,20 @@ def create_grid(domain: dict, n: int = 50):
         X, Y = torch.meshgrid(x, y, indexing='ij')
         return torch.stack([X.flatten(), Y.flatten()], dim=1), (n, n)
 
+
 # ============================================================
-# ОБУЧЕНИЕ
+# TRAINING
 # ============================================================
 
 def train_universal(model, domain: dict, epochs: int = 2000, lr: float = 0.001, 
-                    n_collocation: int = 100, max_time: float = None, 
+                    n_collocation: int = 30, max_time: float = None, 
                     target_metric: str = 'l2re', target_value: float = None, 
                     eval_interval: int = 5):
     """
-    Универсальная функция обучения для LF-PINN и Classical PINN.
-    Добавлены: max_time (секунды) для варианта 1.
-    Для варианта 2: target_metric может быть 'loss', 'l2re' или 'rmse', с target_value.
-    Если metric 'l2re' или 'rmse', вызываем evaluate каждые eval_interval эпох (overhead!).
+    Universal training function for LF-PINN and Classical PINN.
+    Added: max_time (seconds) for option 1.
+    For option 2: target_metric can be 'loss', 'l2re' or 'rmse', with target_value.
+    If metric is 'l2re' or 'rmse', we call evaluate every eval_interval epochs (overhead!).
     """
     trainable_params = list(model.parameters())
     
@@ -56,7 +58,7 @@ def train_universal(model, domain: dict, epochs: int = 2000, lr: float = 0.001,
             'converged': False
         }
     
-    optimizer = torch.optim.AdamW(model.parameters(), lr=0.005, weight_decay=0.01)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     history = {
         'losses': [], 'pde_losses': [], 
         'theta_statistics': [], 'params': [],
@@ -65,7 +67,7 @@ def train_universal(model, domain: dict, epochs: int = 2000, lr: float = 0.001,
     }
     
     is_low_fidelity = hasattr(model, 'n_steps')
-    exact_sol = get_exact_solution(model.pde_type)  # Для evaluate, если нужно
+    exact_sol = get_exact_solution_parametric(model.pde_type)  # For evaluate, if needed
     
     start_train_time = time.time()
     converged = False
@@ -110,13 +112,13 @@ def train_universal(model, domain: dict, epochs: int = 2000, lr: float = 0.001,
             theta_display = f'θ={theta_stats["mean"]:.3f}±{theta_stats["std"]:.3f}' if theta_stats and theta_stats.get('std', 0) > 1e-6 else f'θ={theta_stats["mean"]:.3f}' if theta_stats else 'Classical PINN'
             print(f'   Epoch {epoch:4d}: Loss={total_loss.item():.2e}, PDE={pde_loss:.2e}, {theta_display}')
         
-        # Вариант 1: Остановка по времени
+        # Option 1: Stop by time
         elapsed_time = time.time() - start_train_time
         if max_time is not None and elapsed_time > max_time:
             print(f"   Training stopped after {epoch+1} epochs due to time limit ({max_time}s). Elapsed: {elapsed_time:.2f}s")
             break
         
-        # Вариант 2: Проверка сходимости по выбранной метрике
+        # Option 2: Check convergence by selected metric
         if target_value is not None:
             if target_metric == 'loss':
                 current_val = total_loss.item()
@@ -136,26 +138,147 @@ def train_universal(model, domain: dict, epochs: int = 2000, lr: float = 0.001,
     
     history['epochs_completed'] = epoch + 1
     history['converged'] = converged
-    history['training_time'] = time.time() - start_train_time  # Всегда сохраняем реальное время
+    history['training_time'] = time.time() - start_train_time  # Always save real time
+    
+    return history
+
+def train_with_data(model, domain, data_points, data_values, 
+                    epochs=2000, lr=0.001, n_collocation=30,
+                    lambda_pde=1.0, lambda_bc=10.0, lambda_ic=10.0, lambda_data=10.0,
+                    max_time=None):
+    """
+    Train model with observation data
+    
+    Args:
+        model: LowFidelityPINN or ClassicalPINN
+        domain: dict with boundaries
+        data_points: torch.Tensor [n_data, 2] - observation coordinates (x, t)
+        data_values: torch.Tensor [n_data, 1] - measured values u
+        epochs: number of epochs
+        lr: learning rate
+        n_collocation: number of collocation points
+        lambda_pde, lambda_bc, lambda_ic, lambda_data: loss component weights
+        max_time: maximum training time (seconds)
+    """
+    # Move data to model device
+    device = next(model.parameters()).device
+    data_points = data_points.to(device)
+    data_values = data_values.to(device)
+    
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    
+    history = {
+        'losses': [], 'pde_losses': [], 'bc_losses': [], 
+        'ic_losses': [], 'data_losses': [],
+        'theta_statistics': [], 'params': [],
+        'epochs_completed': 0,
+        'training_time': 0
+    }
+    
+    start_time = time.time()
+    
+    print(f"\n{'='*60}")
+    print(f"Training with data:")
+    print(f"  Number of observations: {len(data_points)}")
+    print(f"  Lambda data: {lambda_data}")
+    print(f"{'='*60}\n")
+    
+    for epoch in range(epochs):
+        optimizer.zero_grad()
+        
+        # Compute loss (use model method if available, otherwise manually)
+        if hasattr(model, 'total_loss_with_data'):
+            total_loss, loss_dict = model.total_loss_with_data(
+                domain, data_points, data_values, n_collocation,
+                lambda_pde, lambda_bc, lambda_ic, lambda_data
+            )
+        else:
+            # For Classical PINN - manually add data loss
+            x_min, x_max = domain['x']
+            t_min, t_max = domain['t']
+            
+            x_col = torch.rand(n_collocation, 1, device=device) * (x_max - x_min) + x_min
+            t_col = torch.rand(n_collocation, 1, device=device) * (t_max - t_min) + t_min
+            points_col = torch.cat([x_col, t_col], dim=1)
+            
+            pde_loss = model.pde_loss(points_col)
+            bc_loss = model.boundary_loss(domain)
+            
+            # Data loss for Classical PINN
+            u_pred = model(data_points)
+            data_loss = torch.mean((u_pred - data_values)**2)
+            
+            total_loss = (lambda_pde * pde_loss + 
+                         lambda_bc * bc_loss + 
+                         lambda_data * data_loss)
+            
+            loss_dict = {
+                'pde': pde_loss.item(),
+                'bc': bc_loss.item(),
+                'ic': 0.0,
+                'data': data_loss.item(),
+                'total': total_loss.item()
+            }
+        
+        if torch.isnan(total_loss):
+            print(f"   WARNING: NaN loss at epoch {epoch}, stopping...")
+            break
+        
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+        
+        # Save history
+        history['losses'].append(loss_dict['total'])
+        history['pde_losses'].append(loss_dict['pde'])
+        history['bc_losses'].append(loss_dict['bc'])
+        history['ic_losses'].append(loss_dict['ic'])
+        history['data_losses'].append(loss_dict['data'])
+        
+        if hasattr(model, 'get_theta_statistics'):
+            theta_stats = model.get_theta_statistics(domain)
+            history['theta_statistics'].append(theta_stats)
+        else:
+            history['theta_statistics'].append(None)
+        
+        if hasattr(model, 'get_params'):
+            history['params'].append(model.get_params())
+        else:
+            history['params'].append({})
+        
+        # Progress output
+        if epoch % max(1, epochs // 10) == 0:
+            print(f"   Epoch {epoch:4d}: Total={loss_dict['total']:.2e}, "
+                  f"PDE={loss_dict['pde']:.2e}, Data={loss_dict['data']:.2e}")
+        
+        # Time check
+        if max_time is not None:
+            elapsed = time.time() - start_time
+            if elapsed > max_time:
+                print(f"   Training stopped due to time limit ({max_time}s)")
+                break
+    
+    history['epochs_completed'] = epoch + 1
+    history['training_time'] = time.time() - start_time
     
     return history
 
 # ============================================================
-# ОЦЕНКА
+# EVALUATION
 # ============================================================
 
 def evaluate(model, domain: dict, exact_solution=None, n_test: int = 2500):
     """
-    Оценка модели на тестовой сетке.
-    Совместима с LF-PINN и Classical PINN.
+    Evaluate model on test grid.
+    Compatible with LF-PINN and Classical PINN.
     """
     model.eval()
     test_points, grid_shape = create_grid(domain, int(np.sqrt(n_test)))
     is_low_fidelity = hasattr(model, 'n_steps')
     
-    # Предсказание в зависимости от типа модели
+    # Prediction depending on model type
     if is_low_fidelity and 't' in domain:
-        # LF-PINN требует отдельные x и t
+        # LF-PINN requires separate x and t
         x_test, t_test = test_points[:, 0:1], test_points[:, 1:2]
         u_pred_list = []
         
@@ -169,17 +292,17 @@ def evaluate(model, domain: dict, exact_solution=None, n_test: int = 2500):
         
         u_pred = torch.cat(u_pred_list, dim=0)
     else:
-        # Classical PINN просто передаем точки
+        # Classical PINN just pass points
         with torch.no_grad():
             u_pred = model(test_points)
     
-    # Сбор статистики θ
+    # Collect θ statistics
     if hasattr(model, 'get_theta_statistics') and 't' in domain:
         theta_stats = model.get_theta_statistics(domain, n_samples=100)
     else:
         theta_stats = None
     
-    # Вычисление PDE residual на подвыборке точек
+    # Compute PDE residual on subset of points
     pde_residual = 0.0
     if hasattr(model, 'pde_loss'):
         try:
@@ -196,7 +319,7 @@ def evaluate(model, domain: dict, exact_solution=None, n_test: int = 2500):
             print(f"   WARNING: Could not compute PDE residual: {e}")
             pde_residual = 0.0
     
-    # Базовые результаты
+    # Base results
     results = {
         'points': test_points, 
         'u_pred': u_pred, 
@@ -208,7 +331,7 @@ def evaluate(model, domain: dict, exact_solution=None, n_test: int = 2500):
         'model_type': model.__class__.__name__
     }
     
-    # Если есть точное решение, вычисляем ошибки
+    # If exact solution available, compute errors
     if exact_solution:
         with torch.no_grad():
             u_exact = exact_solution(test_points)
@@ -226,26 +349,51 @@ def evaluate(model, domain: dict, exact_solution=None, n_test: int = 2500):
     
     return results
 
+def evaluate_and_compare(models_dict, domain, pde_type, true_params=None):
+    """
+    Evaluate multiple models and compare.
+    
+    models_dict: {'name': model, ...}
+    """    
+    if true_params:
+        exact_sol = get_exact_solution_parametric(pde_type, **true_params)
+    else:
+        exact_sol = get_exact_solution_parametric(pde_type)
+    
+    results = {}
+    for name, model in models_dict.items():
+        model.eval()
+        res = evaluate(model, domain, exact_solution=exact_sol)
+        results[name] = {
+            'l2re': res.get('l2re', None),
+            'rmse': res.get('rmse', None),
+            'max_error': res.get('max_err', None)
+        }
+        print(f"{name:30s}: L2RE={res.get('l2re', 0):.4e}, RMSE={res.get('rmse', 0):.4e}")
+    
+    return results
+
+
 # ============================================================
-# ТОЧНЫЕ РЕШЕНИЯ
+# EXACT SOLUTIONS
 # ============================================================
 
 def compute_burgers_exact(coords, nu):
     """
-    Точное решение для Burgers equation через Cole-Hopf преобразование.
+    Exact solution for Burgers equation via Cole-Hopf transformation.
     
     PDE: ∂u/∂t + u·∂u/∂x = ν·∂²u/∂x²
-    IC:  u(x,0) = -sin(π(x + 0.5)) на x ∈ [-0.5, 1.0]
+    IC:  u(x,0) = -sin(π(x + 0.5)) on x ∈ [-0.5, 1.0]
     
-    Решение:
+    Solution:
         u(x,t) = -2ν·∂φ/∂x / φ
-    где
+    where
         φ(x,t) = ∫_{-∞}^{∞} exp(-(x-ξ)²/(4νt) - F(ξ)/(2ν)) dξ
         F(ξ) = ∫₀^ξ u₀(s) ds = ∫₀^ξ -sin(π(s+0.5)) ds = [cos(π(s+0.5))/π]₀^ξ
              = (cos(π(ξ+0.5)) - cos(π·0.5)) / π
-             = (cos(π(ξ+0.5)) - 0) / π  (если 0.5 сдвиг)
+             = (cos(π(ξ+0.5)) - 0) / π  (if 0.5 shift)
     
-    НО! Нужно учесть что F(ξ) — первообразная от u₀:
+    NOTE! Need to account that F(ξ) is the antiderivative of u₀:
         F'(ξ) = u₀(ξ) = -sin(π(ξ+0.5))
         F(ξ) = cos(π(ξ+0.5))/π + C
     """
@@ -255,7 +403,7 @@ def compute_burgers_exact(coords, nu):
     
     x, t = coords[:, 0:1].numpy(), coords[:, 1:2].numpy()
     
-    # Первообразная от IC:
+    # Antiderivative of IC:
     def F_primitive(xi):
         """∫ u₀(s) ds = ∫ -sin(π(s+0.5)) ds"""
         return np.cos(np.pi * (xi)) / np.pi
@@ -266,45 +414,45 @@ def compute_burgers_exact(coords, nu):
         xi = x[i, 0]
         ti = t[i, 0]
         
-        # При t≈0 возвращаем IC:
+        # At t≈0 return IC:
         if ti < 1e-8:
             result[i] = -np.sin(np.pi * xi)
             continue
         
-        # Адаптивные пределы интегрирования:
-        sigma = np.sqrt(4 * nu * ti)  # Стандартное отклонение гауссиана
+        # Adaptive integration limits:
+        sigma = np.sqrt(4 * nu * ti)  # Standard deviation of gaussian
         limit_low = xi - 6 * sigma    # -6σ
         limit_high = xi + 6 * sigma   # +6σ
         
-        # Ограничим пределами домена (с запасом):
+        # Limit by domain bounds (with margin):
         limit_low = max(limit_low, -5.0)
         limit_high = min(limit_high, 5.0)
         
-        # Интегралы для числителя и знаменателя:
+        # Integrals for numerator and denominator:
         def integrand_phi(eta):
-            """Подынтегральное выражение для φ"""
+            """Integrand for φ"""
             gauss = np.exp(-(xi - eta)**2 / (4 * nu * ti))
             hopf = np.exp(-F_primitive(eta) / (2 * nu))
             return gauss * hopf
         
         def integrand_phi_x(eta):
-            """Подынтегральное выражение для ∂φ/∂x"""
+            """Integrand for ∂φ/∂x"""
             gauss_deriv = -(xi - eta) / (2 * nu * ti) * np.exp(-(xi - eta)**2 / (4 * nu * ti))
             hopf = np.exp(-F_primitive(eta) / (2 * nu))
             return gauss_deriv * hopf
         
         try:
-            # Вычисляем φ и ∂φ/∂x:
+            # Compute φ and ∂φ/∂x:
             phi, _ = quad(integrand_phi, limit_low, limit_high, 
                          limit=100, epsabs=1e-10, epsrel=1e-8)
             phi_x, _ = quad(integrand_phi_x, limit_low, limit_high, 
                            limit=100, epsabs=1e-10, epsrel=1e-8)
             
-            # Cole-Hopf формула:
+            # Cole-Hopf formula:
             if abs(phi) > 1e-12:
                 result[i] = -2 * nu * phi_x / phi
             else:
-                # Fallback при малых phi:
+                # Fallback for small phi:
                 result[i] = -np.sin(np.pi * (xi))
         
         except Exception as e:
@@ -314,19 +462,68 @@ def compute_burgers_exact(coords, nu):
     return torch.tensor(result, dtype=coords.dtype, device=coords.device)
 
 
+def get_exact_solution_heat(alpha=1.0):
+    """Exact solution for heat equation with parameter alpha"""
+    def solution(coords):
+        x, t = coords[:, 0:1], coords[:, 1:2]
+        return torch.sin(np.pi * x) * torch.exp(-alpha * np.pi**2 * t)
+    return solution
+
+
+def get_exact_solution_wave(c=1.0):
+    """Exact solution for wave equation with parameter c"""
+    def solution(coords):
+        x, t = coords[:, 0:1], coords[:, 1:2]
+        return torch.sin(np.pi * x) * torch.cos(c * np.pi * t)
+    return solution
+
+
 def get_exact_solution_burgers(nu=0.01):
-    """Wrapper для точного решения Burgers"""
+    """Exact solution for Burgers equation with parameter nu"""
     def solution(coords):
         return compute_burgers_exact(coords, nu)
     return solution
 
-def get_exact_solution(pde_type: str):
-    """Получить точное решение для указанного типа PDE"""
-    solutions = {
-        'heat': lambda c: torch.sin(np.pi * c[:, 0:1]) * torch.exp(-np.pi**2 * c[:, 1:2]),
-        'wave': lambda c: torch.sin(np.pi * c[:, 0:1]) * torch.cos(np.pi * c[:, 1:2]),
-        'burgers': lambda c: compute_burgers_exact(c, nu=0.01),
-        'poisson': lambda c: torch.sin(np.pi * c[:, 0:1]) * torch.sin(np.pi * c[:, 1:2]),
-        'reaction_diffusion': lambda c: 0.5 * (1 + torch.tanh((c[:, 0:1] - 0.2 * c[:, 1:2]) / np.sqrt(2 * 0.01)))
-    }
-    return solutions.get(pde_type, None)
+
+def get_exact_solution_reaction_diffusion(D=0.01, r=1.0):
+    """
+    Exact solution for reaction-diffusion (traveling wave).
+    Wave speed: v = sqrt(D * r / 2)
+    """
+    def solution(coords):
+        x, t = coords[:, 0:1], coords[:, 1:2]
+        v = np.sqrt(D * r / 2)  # front speed
+        return 0.5 * (1 + torch.tanh((x - v * t) / np.sqrt(2 * D)))
+    return solution
+
+
+def get_exact_solution_parametric(pde_type: str, **params):
+    """
+    Universal function to get exact solution with parameters.
+    
+    Args:
+        pde_type: PDE type
+        **params: PDE parameters (alpha, c, nu, D, r)
+    
+    Returns:
+        exact solution function
+    """
+    if pde_type == 'heat':
+        alpha = params.get('alpha', 1.0)
+        return get_exact_solution_heat(alpha)
+    
+    elif pde_type == 'wave':
+        c = params.get('c', 1.0)
+        return get_exact_solution_wave(c)
+    
+    elif pde_type == 'burgers':
+        nu = params.get('nu', 0.01)
+        return get_exact_solution_burgers(nu)
+    
+    elif pde_type == 'reaction_diffusion':
+        D = params.get('D', 0.01)
+        r = params.get('r', 1.0)
+        return get_exact_solution_reaction_diffusion(D, r)
+    
+    else:
+        raise ValueError(f"Unknown pde_type: {pde_type}")
