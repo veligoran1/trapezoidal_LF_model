@@ -13,13 +13,15 @@
   - [5. PDE Training Epochs Study](#5-pde-training-epochs-study)
   - [6. Loss Weighting Methods Study](#6-loss-weighting-methods-study)
 - [Эксперименты: Data Finetuning Stage](#эксперименты-data-finetuning-stage)
-  - [7. Data Training Learning Rate Study](#7-data-training-learning-rate-study)
-  - [8. Data Training Epochs Study](#8-data-training-epochs-study)
-  - [9. Correction Parameters Study](#9-correction-parameters-study)
+  - [1. Correction Parameters Study](#1-correction-parameters-study)
+  - [2. Data Training Learning Rate Study](#2-data-training-learning-rate-study)
+  - [3. Data Training Epochs Study](#3-data-training-epochs-study)
 - [Бенчмарки](#бенчмарки)
-  - [10. Theta Hidden Dim (Neurons Number) Study](#10-theta-hidden-dim-neurons-number-study)
-  - [11. Input Features Study](#11-input-features-study)
-  - [12. Data Points Number Study](#12-data-points-number-study)
+  - [1. Theta Hidden Dim (Neurons Number) Study](#1-theta-hidden-dim-neurons-number-study)
+  - [2. Input Features Study](#2-input-features-study)
+  - [3. Self Benchmark](#3-self-benchmark)
+  - [4. PDE Training Benchmark Comparison](#4-pde-training-benchmark-comparison-lf-pinn-vs-classical-pinn-без-данных)
+  - [5. Data Training Benchmark Comparison](#5-data-training-benchmark-comparison-lf-pinn--data-vs-classical-pinn--data)
 - [Итоговые результаты](#итоговые-результаты)
 - [Выводы](#выводы)
 
@@ -629,3 +631,4 @@ y_{i+1} = y_i + exp(ε_i) · update(θ_i)
 
 - **Low-Fidelity PINN превосходит** классические методы по точности при **5× меньшем числе параметров**
 - Адаптивный θ **автоматически выбирает** подходящую численную схему для каждой задачи
+
